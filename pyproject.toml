@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "mdict-mquery"
+version = "1.0.0"
+description = "High-performance MDX/MDD dictionary file lookup library"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.9"
+keywords = ["mdict", "mdx", "mdd", "dictionary", "lookup"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Libraries",
+    "Topic :: Text Processing :: Linguistic",
+]
+
+[project.urls]
+Homepage = "https://github.com/nelballat/mdict-mquery"
+Repository = "https://github.com/nelballat/mdict-mquery"
+Issues = "https://github.com/nelballat/mdict-mquery/issues"
+
+[tool.setuptools.packages.find]
+include = ["mdict_mquery*"]
