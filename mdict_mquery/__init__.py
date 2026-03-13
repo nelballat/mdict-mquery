@@ -82,19 +82,64 @@ class IndexBuilder:
             if not os.path.isfile(self._mdd_db):
                 self._make_mdd_index(self._mdd_db)
 
-        # Preload entire index into a Python dict for O(1) key lookup
-        # Eliminates per-query SQLite connect/execute/close overhead
-        self._mem_index = {}
+        # Persistent SQLite connection for on-demand record lookups (replaces _mem_index)
+        # Optimized for read-only: immutable (no locking), mmap (zero-copy), no journal
         if os.path.isfile(self._mdx_db):
-            c = sqlite3.connect(self._mdx_db)
-            for row in c.execute("SELECT key_text, file_pos, compressed_size, decompressed_size, record_block_type, record_start, record_end, offset FROM MDX_INDEX"):
-                rec = (row[1], row[2], row[3], row[4], row[5], row[6], row[7])
-                k = row[0]
-                if k in self._mem_index:
-                    self._mem_index[k].append(rec)
-                else:
-                    self._mem_index[k] = [rec]
-            c.close()
+            uri = 'file:' + self._mdx_db.replace('\\', '/') + '?immutable=1'
+            self._conn = sqlite3.connect(uri, uri=True, check_same_thread=False)
+            self._conn.execute("PRAGMA mmap_size=536870912")
+            self._conn.execute("PRAGMA journal_mode=OFF")
+            self._conn.execute("PRAGMA temp_store=MEMORY")
+            self._conn.execute("PRAGMA cache_size=-64000")
+        else:
+            self._conn = None
+
+        # Load key structures: cache path (pickle) or slow path (SQLite query)
+        self._cache_file = _filename + ".mdx.cache"
+        _cache_hit = (
+            not force_rebuild
+            and os.path.isfile(self._cache_file)
+            and os.path.isfile(self._mdx_db)
+            and os.path.getmtime(self._cache_file) > os.path.getmtime(self._mdx_db)
+        )
+
+        if _cache_hit:
+            import pickle
+            with open(self._cache_file, 'rb') as f:
+                _cached = pickle.load(f)
+            self.sorted_keys = _cached['sk']
+            self.kanji_index = _cached['kx']
+            self.key_set = frozenset(self.sorted_keys)
+        else:
+            # Build sorted_keys from SQLite (B-tree gives us sorted order for free)
+            if self._conn:
+                self.sorted_keys = [row[0] for row in self._conn.execute("SELECT DISTINCT key_text FROM MDX_INDEX ORDER BY key_text")]
+            else:
+                self.sorted_keys = []
+            self.key_set = frozenset(self.sorted_keys)
+
+            # Kanji reverse index: CJK character → list of keys containing it in 【...】
+            self.kanji_index = {}
+            for k in self.sorted_keys:
+                if '【' in k:
+                    bp = k.find('【')
+                    ep = k.find('】', bp)
+                    if ep > bp:
+                        for c in k[bp+1:ep]:
+                            if '\u4E00' <= c <= '\u9FFF':
+                                if c in self.kanji_index:
+                                    self.kanji_index[c].append(k)
+                                else:
+                                    self.kanji_index[c] = [k]
+
+            # Save lightweight cache (keys + kanji index only, no record data)
+            if self.sorted_keys:
+                import pickle
+                with open(self._cache_file, 'wb') as f:
+                    pickle.dump({'sk': self.sorted_keys, 'kx': self.kanji_index},
+                                f, protocol=pickle.HIGHEST_PROTOCOL)
+
+        self._keys_cache = tuple(self.sorted_keys)
 
         # Persistent file handle for MDX reads (avoids open/close per lookup)
         self._mdx_fh = open(self._mdx_file, 'rb') if os.path.isfile(self._mdx_file) else None
@@ -106,12 +151,11 @@ class IndexBuilder:
         # Lookup result cache keyed by keyword (LRU via OrderedDict)
         self._result_cache = OrderedDict()
 
-        # Pre-cached key list for get_mdx_keys() without query
-        self._keys_cache = list(self._mem_index.keys()) if self._mem_index else None
-
     def __del__(self):
         if hasattr(self, '_mdx_fh') and self._mdx_fh:
             self._mdx_fh.close()
+        if hasattr(self, '_conn') and self._conn:
+            self._conn.close()
 
     def _replace_stylesheet(self, txt):
         txt_list = re.split(r'`\d+`', txt)
@@ -315,25 +359,23 @@ class IndexBuilder:
         return indexes
 
     def mdx_lookup(self, keyword, ignorecase=None):
-        """Look up a keyword in the MDX dictionary using in-memory index and block cache."""
+        """Look up a keyword via persistent SQLite connection + block/result cache."""
         if keyword in self._result_cache:
             return self._result_cache[keyword]
-        recs = self._mem_index.get(keyword)
+        if not self._conn:
+            return []
+        if ignorecase:
+            recs = self._conn.execute(
+                "SELECT file_pos, compressed_size, decompressed_size, record_block_type, record_start, record_end, offset FROM MDX_INDEX WHERE key_text = ? COLLATE NOCASE", (keyword,)
+            ).fetchall()
+        else:
+            recs = self._conn.execute(
+                "SELECT file_pos, compressed_size, decompressed_size, record_block_type, record_start, record_end, offset FROM MDX_INDEX WHERE key_text = ?", (keyword,)
+            ).fetchall()
         if not recs:
-            if ignorecase:
-                kl = keyword.lower()
-                recs = []
-                for k, v in self._mem_index.items():
-                    if k.lower() == kl:
-                        recs.extend(v)
-                if not recs:
-                    self._result_cache[keyword] = []
-                    return []
-            else:
-                self._result_cache[keyword] = []
-                return []
+            self._result_cache[keyword] = []
+            return []
         results = [self._get_record_fast(rec) for rec in recs]
-        # Evict oldest result if cache is full
         if len(self._result_cache) >= _RESULT_CACHE_MAX:
             self._result_cache.popitem(last=False)
         self._result_cache[keyword] = results
@@ -374,7 +416,7 @@ class IndexBuilder:
         return self.get_keys(self._mdd_db, query)
 
     def get_mdx_keys(self, query=''):
-        """Return all MDX keys. Uses pre-cached list when no query filter is given."""
-        if not query and self._keys_cache is not None:
+        """Return all MDX keys. Uses pre-cached tuple when no query filter is given."""
+        if not query and self._keys_cache:
             return list(self._keys_cache)
         return self.get_keys(self._mdx_db, query)
