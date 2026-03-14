@@ -5,6 +5,7 @@
 
 from .readmdict import MDX, MDD
 from struct import pack, unpack
+from bisect import bisect_left
 from io import BytesIO
 from collections import OrderedDict
 import re
@@ -23,6 +24,18 @@ except ImportError:
 _BLOCK_CACHE_MAX = 256
 # Maximum number of lookup results to keep in memory
 _RESULT_CACHE_MAX = 8192
+
+
+class _SortedKeySet:
+    """Set-like wrapper over a sorted list using bisect for O(log n) membership."""
+    __slots__ = ('_keys',)
+    def __init__(self, sorted_keys): self._keys = sorted_keys
+    def __contains__(self, item):
+        keys = self._keys; i = bisect_left(keys, item)
+        return i < len(keys) and keys[i] == item
+    def __len__(self): return len(self._keys)
+    def __iter__(self): return iter(self._keys)
+    def __bool__(self): return bool(self._keys)
 
 
 class IndexBuilder:
@@ -109,16 +122,12 @@ class IndexBuilder:
                 _cached = pickle.load(f)
             self.sorted_keys = _cached['sk']
             self.kanji_index = _cached['kx']
-            self.key_set = frozenset(self.sorted_keys)
         else:
-            # Build sorted_keys from SQLite (B-tree gives us sorted order for free)
             if self._conn:
                 self.sorted_keys = [row[0] for row in self._conn.execute("SELECT DISTINCT key_text FROM MDX_INDEX ORDER BY key_text")]
             else:
                 self.sorted_keys = []
-            self.key_set = frozenset(self.sorted_keys)
 
-            # Kanji reverse index: CJK character → list of keys containing it in 【...】
             self.kanji_index = {}
             for k in self.sorted_keys:
                 if '【' in k:
@@ -132,14 +141,13 @@ class IndexBuilder:
                                 else:
                                     self.kanji_index[c] = [k]
 
-            # Save lightweight cache (keys + kanji index only, no record data)
             if self.sorted_keys:
                 import pickle
                 with open(self._cache_file, 'wb') as f:
                     pickle.dump({'sk': self.sorted_keys, 'kx': self.kanji_index},
                                 f, protocol=pickle.HIGHEST_PROTOCOL)
 
-        self._keys_cache = tuple(self.sorted_keys)
+        self.key_set = _SortedKeySet(self.sorted_keys)
 
         # Persistent file handle for MDX reads (avoids open/close per lookup)
         self._mdx_fh = open(self._mdx_file, 'rb') if os.path.isfile(self._mdx_file) else None
@@ -416,7 +424,7 @@ class IndexBuilder:
         return self.get_keys(self._mdd_db, query)
 
     def get_mdx_keys(self, query=''):
-        """Return all MDX keys. Uses pre-cached tuple when no query filter is given."""
-        if not query and self._keys_cache:
-            return list(self._keys_cache)
+        """Return all MDX keys. Uses sorted_keys when no query filter is given."""
+        if not query and self.sorted_keys:
+            return list(self.sorted_keys)
         return self.get_keys(self._mdx_db, query)

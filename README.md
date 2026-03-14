@@ -8,7 +8,8 @@ Forked from the original [mdict-query](https://github.com/mmjang/mdict-query) (2
 
 - **SQLite-backed lookups** — persistent, read-optimized SQLite connection for on-demand record lookups (immutable mode, mmap, no journaling)
 - **Pickle cache** — pre-built key structures cached to disk; subsequent loads bypass SQLite key queries (~20x faster init vs baseline)
-- **Pre-built key collections** — `key_set` (frozenset), `sorted_keys` (sorted list), `kanji_index` (CJK reverse index) built once at init
+- **Sorted key set** — `_SortedKeySet` wrapper over sorted list using `bisect` for O(log n) membership testing with zero memory duplication
+- **Kanji index** — CJK reverse index for bracket-notation lookups
 - **Block decompression cache** — LRU cache for decompressed record blocks (256 blocks)
 - **Result cache** — LRU cache for lookup results (8,192 entries)
 - **Persistent file handle** — single file handle with thread lock (no open/close per lookup)
@@ -35,8 +36,7 @@ results = ib.mdx_lookup("食べる")
 for entry in results:
     print(entry)
 
-# Pre-built key collections (no copying overhead)
-keys = ib.key_set          # frozenset — O(1) membership test
+# Key collections
 sorted_keys = ib.sorted_keys  # sorted list — binary search ready
 kanji_idx = ib.kanji_index    # CJK char → list of keys with that kanji in 【...】
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mdict-mquery"
-version = "2.0.0"
+version = "2.1.0"
 description = "High-performance MDX/MDD dictionary file lookup library"
 readme = "README.md"
 license = {text = "MIT"}
